@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ALPR Vision — Reconocimiento de Placas</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@700&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+
+    <div class="app">
+
+        <!-- ── HEADER ── -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect width="32" height="32" rx="8" fill="url(#grad)" />
+                        <rect x="6" y="10" width="20" height="12" rx="2" fill="white" fill-opacity="0.15" />
+                        <rect x="8" y="12" width="16" height="8" rx="1" fill="white" fill-opacity="0.9" />
+                        <text x="16" y="18.5" text-anchor="middle" font-size="5" font-weight="900" fill="#0f172a"
+                            font-family="monospace">ALPR</text>
+                        <defs>
+                            <linearGradient id="grad" x1="0" y1="0" x2="32" y2="32">
+                                <stop stop-color="#3b82f6" />
+                                <stop offset="1" stop-color="#6366f1" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    <div>
+                        <h1>ALPR <span class="gradient-text">Vision</span></h1>
+                        <p class="subtitle">YOLO11n · EasyOCR · ONNX Runtime</p>
+                    </div>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="pill fps-pill" id="fps-pill">
+                    <span class="dot pulse" id="fps-dot"></span>
+                    <span id="fps-display">— FPS</span>
+                    <span id="fps-infer" class="fps-infer">INF: —</span>
+                </div>
+                <div class="pill status-pill">
+                    <span class="dot dot-blue"></span>
+                    Sistema Activo
+                </div>
+                <button class="btn-export" id="btn-export" onclick="exportCSV()" title="Exportar historial CSV">
+                    ⬇ Exportar CSV
+                </button>
+            </div>
+        </header>
+
+        <!-- ── ALERTA FPS BAJO ── -->
+        <div class="fps-alert" id="fps-alert">
+            ⚠ FPS bajo — el sistema puede estar saturado. Cierra otras aplicaciones.
+        </div>
+
+        <!-- ── MAIN GRID ── -->
+        <main class="grid">
+
+            <!-- VIDEO PANEL -->
+            <section class="panel video-panel">
+                <div class="panel-header">
+                    <h2>Cámara en Vivo</h2>
+                    <span class="badge-live">● REC</span>
+                </div>
+                <div class="video-wrap">
+                    <img src="{{ url_for('video_feed') }}" id="video-stream" alt="Stream">
+                    <div class="scan-line"></div>
+                </div>
+            </section>
+
+            <!-- SIDE PANEL -->
+            <aside class="side">
+
+                <!-- CURRENT PLATE -->
+                <div class="panel plate-panel">
+                    <div class="panel-header">
+                        <h2>Última Placa</h2>
+                        <span id="plate-time" class="text-muted small">—</span>
+                    </div>
+                    <div class="plate-wrap">
+                        <div class="plate-frame" id="plate-frame">
+                            <div class="plate-bolts">
+                                <span class="bolt"></span><span class="bolt"></span>
+                            </div>
+                            <span id="plate-text">· · · · · ·</span>
+                            <div class="plate-bolts">
+                                <span class="bolt"></span><span class="bolt"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- BARRA DE CONFIANZA -->
+                    <div class="conf-wrap">
+                        <div class="conf-header">
+                            <span class="conf-label">Confianza OCR</span>
+                            <span id="conf-value">—</span>
+                        </div>
+                        <div class="conf-bar-bg">
+                            <div class="conf-bar-fill" id="conf-bar" style="width:0%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- METRICS -->
+                <div class="panel metrics-panel">
+                    <div class="panel-header">
+                        <h2>Parámetros del Sistema</h2>
+                        <button class="btn-debug" id="btn-debug" onclick="toggleDebug()">Debug</button>
+                    </div>
+                    <ul class="metrics">
+                        <li>
+                            <span class="metric-label">Modelo</span>
+                            <span class="chip">YOLO11 Nano</span>
+                        </li>
+                        <li>
+                            <span class="metric-label">Backend</span>
+                            <span class="chip">ONNX Runtime</span>
+                        </li>
+                        <li>
+                            <span class="metric-label">OCR</span>
+                            <span class="chip">EasyOCR + CLAHE</span>
+                        </li>
+                        <li>
+                            <span class="metric-label">Dispositivo</span>
+                            <span class="chip chip-cpu">CPU</span>
+                        </li>
+                        <li>
+                            <span class="metric-label">Precisión mAP50</span>
+                            <span class="chip chip-green">90.4 %</span>
+                        </li>
+                        <li>
+                            <span class="metric-label">Recall</span>
+                            <span class="chip chip-green">99.8 %</span>
+                        </li>
+                    </ul>
+
+                    <!-- PANEL DEBUG (oculto por defecto) -->
+                    <div class="debug-panel" id="debug-panel" style="display:none">
+                        <div class="debug-title">Métricas en vivo</div>
+                        <div class="debug-grid">
+                            <span>Sesión</span><span id="d-session">—</span>
+                            <span>Stream FPS</span><span id="d-fps">—</span>
+                            <span>Inference FPS</span><span id="d-if">—</span>
+                            <span>Total detecciones</span><span id="d-total">—</span>
+                            <span>Placas únicas</span><span id="d-unique">—</span>
+                            <span>Primera vista</span><span id="d-first">—</span>
+                            <span>Última vista</span><span id="d-last">—</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- HISTORY -->
+                <div class="panel history-panel">
+                    <div class="panel-header">
+                        <h2>Historial</h2>
+                        <span id="count-badge" class="badge-count">0</span>
+                    </div>
+                    <ul id="history-list" class="history-list">
+                        <li class="history-empty">Sin detecciones aún…</li>
+                    </ul>
+                </div>
+
+            </aside>
+        </main>
+    </div>
+
+    <script>
+        let totalDetections = 0;
+        let lastPlate = "";
+        let debugVisible = false;
+        let debounceTimer = null;
+
+        // ── Polling rápido (300ms) con debounce en actualizaciones de DOM ──────
+        function updateStatus() {
+            fetch('/status')
+                .then(r => r.json())
+                .then(data => {
+                    // FPS display
+                    const fps = data.fps || 0;
+                    const ifps = data.inference_fps || 0;
+                    document.getElementById('fps-display').textContent = fps + ' FPS';
+                    document.getElementById('fps-infer').textContent = 'INF: ' + ifps;
+
+                    // Alerta FPS bajo
+                    const alert = document.getElementById('fps-alert');
+                    const fpsDot = document.getElementById('fps-dot');
+                    const fpsPill = document.getElementById('fps-pill');
+                    if (fps > 0 && fps < 10) {
+                        alert.classList.add('visible');
+                        fpsPill.classList.add('fps-pill--warn');
+                        fpsDot.style.background = '#f59e0b';
+                    } else {
+                        alert.classList.remove('visible');
+                        fpsPill.classList.remove('fps-pill--warn');
+                        fpsDot.style.background = '';
+                    }
+
+                    // Placa actual
+                    if (data.plate && data.plate !== lastPlate) {
+                        lastPlate = data.plate;
+                        const el = document.getElementById('plate-text');
+                        const frame = document.getElementById('plate-frame');
+                        el.textContent = data.plate;
+                        document.getElementById('plate-time').textContent =
+                            new Date().toLocaleTimeString();
+                        frame.classList.remove('flash');
+                        void frame.offsetWidth;
+                        frame.classList.add('flash');
+                        totalDetections++;
+                        document.getElementById('count-badge').textContent = totalDetections;
+                    }
+
+                    // Barra de confianza
+                    const conf = data.conf || 0;
+                    const confBar = document.getElementById('conf-bar');
+                    const confVal = document.getElementById('conf-value');
+                    confBar.style.width = conf + '%';
+                    confVal.textContent = conf > 0 ? conf + '%' : '—';
+                    confBar.style.background = conf >= 70
+                        ? 'linear-gradient(90deg,#22c55e,#4ade80)'
+                        : conf >= 40
+                            ? 'linear-gradient(90deg,#f59e0b,#fbbf24)'
+                            : 'linear-gradient(90deg,#ef4444,#f87171)';
+
+                    // Historial
+                    const list = document.getElementById('history-list');
+                    if (data.history && data.history.length > 0) {
+                        list.innerHTML = data.history.map((p, i) =>
+                            `<li class="history-item ${i === 0 ? 'history-item--new' : ''}">
+                            <span class="history-plate">${p}</span>
+                            <span class="history-icon">🚗</span>
+                        </li>`
+                        ).join('');
+                    }
+                })
+                .catch(() => { });
+        }
+
+        // ── Panel de debug ─────────────────────────────────────────────────────
+        function toggleDebug() {
+            debugVisible = !debugVisible;
+            document.getElementById('debug-panel').style.display =
+                debugVisible ? 'block' : 'none';
+            document.getElementById('btn-debug').classList.toggle('btn-debug--active', debugVisible);
+            if (debugVisible) fetchMetrics();
+        }
+
+        function fetchMetrics() {
+            if (!debugVisible) return;
+            fetch('/metrics')
+                .then(r => r.json())
+                .then(m => {
+                    document.getElementById('d-session').textContent = m.session_id || '—';
+                    document.getElementById('d-fps').textContent = m.stream_fps || '—';
+                    document.getElementById('d-if').textContent = m.inference_fps || '—';
+                    document.getElementById('d-total').textContent = m.total_detections || 0;
+                    document.getElementById('d-unique').textContent = m.unique_plates || 0;
+                    document.getElementById('d-first').textContent = m.first_seen ? m.first_seen.replace('T', ' ') : '—';
+                    document.getElementById('d-last').textContent = m.last_seen ? m.last_seen.replace('T', ' ') : '—';
+                })
+                .catch(() => { });
+        }
+
+        // ── Exportar CSV ───────────────────────────────────────────────────────
+        function exportCSV() {
+            const btn = document.getElementById('btn-export');
+            btn.textContent = '⏳ Generando...';
+            btn.disabled = true;
+            window.location.href = '/export_csv';
+            setTimeout(() => {
+                btn.textContent = '⬇ Exportar CSV';
+                btn.disabled = false;
+            }, 2000);
+        }
+
+        // ── Arrancar polling ───────────────────────────────────────────────────
+        setInterval(updateStatus, 300);
+        setInterval(fetchMetrics, 3000);   // métricas debug cada 3 s
+        updateStatus();
+    </script>
+</body>
+
+</html>

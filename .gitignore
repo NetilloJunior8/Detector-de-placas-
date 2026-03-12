@@ -1,0 +1,59 @@
+# === Entornos Virtuales ===
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# === Variables de Entorno ===
+# NUNCA subir este archivo, contiene las API KEYS
+.env
+*.env
+
+# === Modelos de Machine Learning ===
+# Los modelos ONNX/.pt son pesados (50MB-200MB), no van en Git
+# Cada miembro los descarga desde el Drive/Colab o los genera localmente
+models/*.onnx
+models/*.pt
+models/*.weights
+!models/.gitkeep
+
+# === Dataset y Datos Generados ===
+data/frames/
+data/videos/
+data/raw/
+!data/.gitkeep
+
+# === Outputs de Entrenamiento YOLO (Colab los genera) ===
+runs/
+
+# === Python Cache ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# === Distribución / Packaging ===
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# === IDEs y Editores ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# === Sistema Operativo ===
+.DS_Store       # macOS
+Thumbs.db       # Windows
+desktop.ini     # Windows
+
+# === Jupyter / Colab ===
+# Solo ignoramos los checkpoints, NO los notebooks
+.ipynb_checkpoints/
+
+# === Logs del sistema ===
+logs/*.log
+!logs/.gitkeep
