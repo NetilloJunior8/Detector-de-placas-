@@ -1,10 +1,11 @@
-ultralytics>=8.3.0        # YOLO11 (using ultralytics package)
-easyocr>=1.7.2            # Para lectura de patentes
-opencv-contrib-python>=4.10.0.84  # OpenCV completo — incluye CLAHE (createCLAHE) y módulos extra
-onnxruntime>=1.19.0       # Inferencia ONNX CPU (Matebook sin GPU)
-Pillow>=10.4.0            # Manipulación de imágenes
-roboflow>=1.1.41          # Descarga de datasets si es necesario
-Flask>=3.0.0              # Servidor Web
-python-dotenv>=1.0.0      # Carga variables del archivo .env
-# Nota: sqlite3 es parte de la librería estándar de Python, no requiere instalacion adicional
+ultralytics>=8.3.0              # YOLO11 (using ultralytics package)
+# OCR Engine: EasyOCR (Fallback stable)
+easyocr>=1.7.2
+opencv-contrib-python>=4.10.0.84  # OpenCV completo — incluye CLAHE y módulos extra
+onnxruntime-directml            # Aceleración por hardware dedicada para Windows (AMD/Intel GPU)
+Pillow>=10.4.0                  # Manipulación de imágenes
+roboflow>=1.1.41                # Descarga de datasets si es necesario
+Flask>=3.0.0                    # Servidor Web
+python-dotenv>=1.0.0            # Carga variables del archivo .env
+# Nota: sqlite3 es parte de la librería estándar de Python, no requiere instalación adicional
 

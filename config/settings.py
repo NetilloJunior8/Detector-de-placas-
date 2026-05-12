@@ -41,7 +41,7 @@ DB_PATH     = LOGS_DIR / "detections.db"
 # Configuración del Modelo de Detección (YOLO)
 # ──────────────────────────────────────────────────────────────────────────────
 
-DETECTION_MODEL_NAME = os.getenv("DETECTION_MODEL", "best.onnx")
+DETECTION_MODEL_NAME = os.getenv("DETECTION_MODEL", "best.pt")
 USE_ONNX             = DETECTION_MODEL_NAME.endswith(".onnx")
 
 # Umbral mínimo de confianza para considerar una detección válida (0.0 a 1.0)
@@ -84,10 +84,10 @@ OCR_ROI_WIDTH = int(os.getenv("OCR_ROI_WIDTH", "320"))
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Número mínimo de veces que debe aparecer un texto OCR para ser confirmado
-PLATE_MIN_VOTES = int(os.getenv("PLATE_MIN_VOTES", "2"))
+PLATE_MIN_VOTES = int(os.getenv("PLATE_MIN_VOTES", "3"))
 
 # Tamaño de la ventana de lecturas sobre la que se cuenta la votación
-PLATE_VOTE_WINDOW = int(os.getenv("PLATE_VOTE_WINDOW", "5"))
+PLATE_VOTE_WINDOW = int(os.getenv("PLATE_VOTE_WINDOW", "7"))
 
 # Longitud mínima del texto de placa para considerarlo válido
 PLATE_MIN_LEN = int(os.getenv("PLATE_MIN_LEN", "3"))

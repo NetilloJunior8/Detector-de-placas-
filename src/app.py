@@ -59,7 +59,7 @@ def status():
     """Endpoint JSON con toda la info en tiempo real para el frontend."""
     if detector is None:
         return jsonify({"plate": "", "history": [], "fps": 0,
-                        "conf": 0, "inference_fps": 0})
+                        "conf": 0, "inference_fps": 0, "boxes": []})
     return jsonify({
         "plate":         detector.latest_detected_plate,
         "conf":          round(detector.latest_confidence * 100, 1),
@@ -67,6 +67,7 @@ def status():
         "fps":           round(detector.fps, 1),
         "inference_fps": round(detector.inference_fps, 1),
         "session_id":    detector.session_id,
+        "boxes":         detector.latest_boxes,
     })
 
 

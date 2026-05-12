@@ -5,10 +5,11 @@ Detector ALPR de alto rendimiento — 3 hilos + OCR completamente asíncrono.
 
 Arquitectura:
   Thread A : Captura  ──► raw_queue(2)           [siempre a 30 FPS]
-  Thread B : YOLO     ──► det_queue(2)            [~5-10 FPS, SIN OCR]
+  Thread B : YOLO     ──► det_queue(2)            [~10-15 FPS, SIN OCR]
   Thread C : Render   ◄── det_queue(2)            [siempre fluido, JPEG encode]
   OCR Exec : 1 worker ──► actualiza texto vía lock [async, NUNCA bloquea el video]
 
+OCR Engine: PaddleOCR (PP-OCRv4 mobile, CPU) — 5-10x más rápido que EasyOCR.
 El video corre siempre a la velocidad de la cámara.
 OCR corre en paralelo sin interrumpir el stream.
 """
@@ -44,17 +45,24 @@ from plate_logger import PlateLogger
 
 logger = setup_logger(__name__)
 
-# Regex para filtrar texto OCR válido (placas México/LATAM)
-_PLATE_RE = re.compile(
-    r'^[A-Z0-9]{2,4}[-\s]?[A-Z0-9]{2,4}[-\s]?[A-Z0-9]{0,4}$'
-)
+# Regex universal para placas: permite combinaciones alfanuméricas de 5 a 8 caracteres
+_PLATE_RE = re.compile(r'^[A-Z0-9]{5,8}$')
 
 
 def _is_valid_plate(text: str) -> bool:
+    # Normalizar: quitar espacios y guiones antes de validar
     clean = text.strip().upper().replace(" ", "").replace("-", "")
     if len(clean) < PLATE_MIN_LEN:
         return False
-    return bool(_PLATE_RE.match(text.strip().upper()))
+        
+    # Validación extra: una placa real debe tener al menos un número y una letra
+    has_letters = any(c.isalpha() for c in clean)
+    has_numbers = any(c.isdigit() for c in clean)
+    if not (has_letters and has_numbers):
+        return False
+        
+    # Aplicar el regex sobre el texto LIMPIO
+    return bool(_PLATE_RE.match(clean))
 
 
 def _correct_plate_characters(text: str) -> str:
@@ -63,25 +71,48 @@ def _correct_plate_characters(text: str) -> str:
         return text
     chars = list(text.upper().strip())
     for i, c in enumerate(chars):
+        # Determinar si el caracter está en los bordes de la placa
+        is_edge = (i == 0) or (i == len(chars) - 1)
+        
+        is_num_prev = i > 0 and chars[i-1].isdigit()
+        is_num_next = i < len(chars)-1 and chars[i+1].isdigit()
+        
+        is_alpha_prev = i > 0 and chars[i-1].isalpha()
+        is_alpha_next = i < len(chars)-1 and chars[i+1].isalpha()
+
         if c in ('O', 'Q', 'I', 'Z', 'B', 'S', 'G', 'D'):
-            is_num_prev = i > 0 and chars[i-1].isdigit()
-            is_num_next = i < len(chars)-1 and chars[i+1].isdigit()
-            if is_num_prev or is_num_next:
+            # Convertir letra a número
+            should_change_to_num = False
+            if is_edge:
+                should_change_to_num = is_num_prev or is_num_next
+            else:
+                # Si está en medio, es más seguro cambiar solo si AMBOS lados son números
+                # o si la mayoría de su contexto lo sugiere.
+                should_change_to_num = is_num_prev and is_num_next
+                
+            if should_change_to_num:
                 if c in ('O', 'Q', 'D'): chars[i] = '0'
                 elif c == 'I': chars[i] = '1'
                 elif c == 'Z': chars[i] = '2'
                 elif c == 'B': chars[i] = '8'
                 elif c == 'S': chars[i] = '5'
                 elif c == 'G': chars[i] = '6'
+
         elif c in ('0', '1', '2', '5', '8'):
-            is_alpha_prev = i > 0 and chars[i-1].isalpha()
-            is_alpha_next = i < len(chars)-1 and chars[i+1].isalpha()
-            if is_alpha_prev and is_alpha_next:
+            # Convertir número a letra
+            should_change_to_alpha = False
+            if is_edge:
+                should_change_to_alpha = is_alpha_prev or is_alpha_next
+            else:
+                should_change_to_alpha = is_alpha_prev and is_alpha_next
+
+            if should_change_to_alpha:
                 if c == '0': chars[i] = 'O'
                 elif c == '1': chars[i] = 'I'
                 elif c == '2': chars[i] = 'Z'
                 elif c == '5': chars[i] = 'S'
                 elif c == '8': chars[i] = 'B'
+                
     return "".join(chars)
 
 
@@ -119,7 +150,7 @@ class ALPRDetector:
         logger.info(f"Cargando modelo: {model_to_load}")
         self.model = YOLO(model_to_load, task='detect')
 
-        # ── EasyOCR ──────────────────────────────────────────────────────────
+        # ── EasyOCR ────────────────────────────────────────────────────────────
         logger.info(f"Cargando EasyOCR (idiomas: {OCR_LANGUAGES}, GPU: {OCR_USE_GPU})")
         self.reader = easyocr.Reader(OCR_LANGUAGES, gpu=OCR_USE_GPU)
 
@@ -135,6 +166,7 @@ class ALPRDetector:
         self._latest_frame: bytes | None = None
         self._latest_plate: str          = ""
         self._latest_conf: float         = 0.0
+        self._latest_boxes: list         = []   # BUG FIX: inicializar para evitar AttributeError
         self._detection_history: deque   = deque(maxlen=MAX_HISTORY)
         self._stream_fps: float          = 0.0
         self._infer_fps: float           = 0.0
@@ -169,6 +201,11 @@ class ALPRDetector:
             return self._latest_conf
 
     @property
+    def latest_boxes(self) -> list:
+        with self._lock:
+            return self._latest_boxes
+
+    @property
     def detection_history(self) -> list:
         with self._lock:
             return list(reversed(self._detection_history))
@@ -190,64 +227,135 @@ class ALPRDetector:
     # ─── Pre-procesamiento y OCR (corre en executor thread) ──────────────────
 
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
-        """CLAHE + Binarización Adaptativa + morphological opening."""
+        """
+        Preprocesamiento OCR robusto para placas en condiciones adversas:
+        1. Resize con Lanczos para mantener nitidez
+        2. Escala de grises
+        3. CLAHE primero — normaliza iluminación ANTES de sharpen (fix bug orden)
+        4. Denoise leve
+        5. Sharpen — ahora sobre imagen ya normalizada
+        6. Threshold adaptativo — maneja iluminación no uniforme (sombras, placa chueca)
+        Retorna tanto la versión binarizada como la imagen CLAHE (intentará ambas con EasyOCR).
+        """
         if roi.size == 0:
             return roi
         h, w = roi.shape[:2]
-        if w > 0:
-            scale = OCR_ROI_WIDTH / w
-            new_h = max(1, int(h * scale))
-            roi = cv2.resize(roi, (OCR_ROI_WIDTH, new_h), interpolation=cv2.INTER_LANCZOS4)
-        gray     = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        if w < 10 or h < 5:   # ROI demasiado pequeño — skip
+            return roi
+        # 1. Resize manteniendo proporción
+        scale = OCR_ROI_WIDTH / w
+        new_h = max(1, int(h * scale))
+        roi = cv2.resize(roi, (OCR_ROI_WIDTH, new_h), interpolation=cv2.INTER_LANCZOS4)
+        # 2. Escala de grises
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # 3. CLAHE PRIMERO — normalizar iluminación desigual antes de cualquier filtro
         enhanced = self._clahe.apply(gray)
-        blur = cv2.bilateralFilter(enhanced, 11, 17, 17)
+        # 4. Denoise leve para reducir ruido de cámara
+        enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
+        # 5. Sharpen sobre imagen ya normalizada
+        _kernel_sharp = np.array([[-1, -1, -1],
+                                  [-1,  9, -1],
+                                  [-1, -1, -1]], dtype=np.float32)
+        sharpened = cv2.filter2D(enhanced, -1, _kernel_sharp)
+        sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+        # 6. Threshold ADAPTATIVO — robusto a iluminación no uniforme y placas torcidas
+        # Incrementamos blockSize para evitar romper trazos gruesos (21 en lugar de 15)
         binary = cv2.adaptiveThreshold(
-            blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 3
+            sharpened, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            blockSize=21, C=8
         )
-        kernel   = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        return cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        # Retornamos tanto la versión en escala de grises realzada (excelente para redes neuronales como EasyOCR)
+        # como la versión binarizada (buena para alto contraste)
+        return enhanced, binary
 
-    def _ocr_box(self, frame: np.ndarray, x1: int, y1: int,
-                 x2: int, y2: int) -> str:
-        h, w = frame.shape[:2]
-        box_w = max(1, x2 - x1)
-        box_h = max(1, y2 - y1)
-        pad_x = int(box_w * 0.15)
-        pad_y = int(box_h * 0.25)
-        
-        roi  = frame[max(0, y1 - pad_y): min(h, y2 + pad_y),
-                     max(0, x1 - pad_x): min(w, x2 + pad_x)]
-        proc = self._preprocess_roi(roi)
-        if proc.size == 0:
+    def _ocr_box(self, roi_crop: np.ndarray) -> str:
+        """
+        Recibe el ROI ya recortado. Intenta OCR sobre la imagen preprocesada.
+        Si no obtiene resultado válido, reintenta con la imagen binarizada.
+        """
+        if roi_crop is None or roi_crop.size == 0:
             return ""
-        results = self.reader.readtext(proc, detail=1, paragraph=False)
-        texts   = [r[1].upper().strip() for r in results if r[2] >= OCR_MIN_CONFIDENCE]
-        raw_text = " ".join(texts).strip()
-        return _correct_plate_characters(raw_text)
+
+        enhanced, binary = self._preprocess_roi(roi_crop)
+
+        def _process_results(results_list, min_conf):
+            valid = [r for r in results_list if r[2] >= min_conf]
+            if not valid:
+                return ""
+            heights = [max(pt[1] for pt in r[0]) - min(pt[1] for pt in r[0]) for r in valid]
+            max_h = max(heights)
+            texts = [r[1].upper().strip() for r, h in zip(valid, heights) if h >= max_h * 0.55]
+            return "".join(texts).strip()
+
+        # Intento 1: Imagen realzada (escala de grises con CLAHE). 
+        # EasyOCR funciona MUCHÍSIMO mejor con gradientes naturales que con imágenes binarizadas.
+        best_text = ""
+        try:
+            results = self.reader.readtext(enhanced, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
+            best_text = _process_results(results, OCR_MIN_CONFIDENCE)
+        except Exception as e:
+            logger.debug(f"OCR intento 1 falló: {e}")
+
+        # Intento 2 (fallback): Imagen binarizada (por si la placa está muy sucia o con sombras extremas)
+        if not best_text:
+            try:
+                results2 = self.reader.readtext(binary, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
+                best_text = _process_results(results2, max(0.15, OCR_MIN_CONFIDENCE - 0.15))
+                if best_text:
+                    logger.debug(f"OCR fallback exitoso: '{best_text}'")
+            except Exception as e:
+                logger.debug(f"OCR intento 2 falló: {e}")
+
+        result = _correct_plate_characters(best_text)
+        if result:
+            logger.debug(f"OCR raw result: '{result}'")
+        return result
 
     def _vote_plate(self, candidate: str) -> str | None:
-        """Solo llamar desde OCR executor (max_workers=1 → thread-safe)."""
-        self._vote_window.append(candidate)
+        """Solo llamar desde OCR executor (max_workers=1 → thread-safe).
+        Normaliza el candidato antes de votar para evitar que 'ABC-123' y 'ABC123'
+        cuenten como lecturas distintas.
+        """
+        # Normalizar: quitar guiones y espacios antes de acumular en la ventana
+        normalized = candidate.strip().upper().replace("-", "").replace(" ", "")
+        self._vote_window.append(normalized)
         counts = Counter(self._vote_window)
         best, best_count = counts.most_common(1)[0]
         if best_count >= PLATE_MIN_VOTES and _is_valid_plate(best):
             return best
         return None
 
-    def _run_ocr_job(self, frame: np.ndarray, boxes: list) -> list:
+    def _run_ocr_job(self, roi_crops: list, boxes: list) -> list:
         """
         Corre en el OCR executor thread.
+        Recibe roi_crops (recortes de imagen ya extraídos) en lugar del frame completo
+        para reducir el uso de memoria y evitar copiar frames grandes.
         Retorna lista actualizada de (x1,y1,x2,y2,text,conf,track_id).
         Actualiza el estado de placa detectada vía self._lock.
         """
         updated = []
-        for box in boxes:
-            x1, y1, x2, y2, _, conf = box[:6]
+        for roi_crop, box in zip(roi_crops, boxes):
+            x1, y1, x2, y2, prev_text, conf = box[:6]
             track_id = box[6] if len(box) > 6 else -1
-            
-            raw_text  = self._ocr_box(frame, x1, y1, x2, y2)
+
+            raw_text  = self._ocr_box(roi_crop)
             confirmed = self._vote_plate(raw_text) if raw_text else None
-            text      = confirmed if confirmed else raw_text
+            
+            # Lógica Anti-Parpadeo (Flicker Prevention):
+            # Si ya tenemos una placa confirmada de los últimos frames, la mantenemos.
+            # Si no, si obtuvimos texto raw que parece placa, lo mostramos.
+            # Si obtenemos basura OCR ("letras nada que ver"), preferimos mantener el texto anterior.
+            text = prev_text
+            if confirmed:
+                text = confirmed
+            elif raw_text:
+                if _is_valid_plate(raw_text):
+                    text = raw_text
+                elif not prev_text:
+                    text = raw_text
+            
             updated.append((x1, y1, x2, y2, text, conf, track_id))
 
             if confirmed:
@@ -366,33 +474,48 @@ class ALPRDetector:
 
                 # ── YOLO cada INFER_EVERY_N frames ───────────────────────────
                 if frame_count % INFER_EVERY_N == 0:
-                    yolo_results = self.model.track(
-                        frame,
-                        imgsz=MODEL_IMG_SIZE,
-                        stream=True,
-                        conf=DETECTION_CONFIDENCE,
-                        persist=True,
-                        tracker="bytetrack.yaml",
-                        verbose=False,
-                    )
+                    # BUG FIX: usar predict() con stream=False en lugar de track(stream=True)
+                    # track+stream=True puede retornar generator vacío en single-frame inference.
+                    # predict() es más estable y retorna resultados directamente.
+                    try:
+                        yolo_results = self.model.predict(
+                            frame,
+                            imgsz=MODEL_IMG_SIZE,
+                            conf=DETECTION_CONFIDENCE,
+                            verbose=False,
+                        )
+                    except Exception as yolo_err:
+                        logger.warning(f"YOLO predict error: {yolo_err}")
+                        yolo_results = []
+
                     new_boxes = []
+                    total_raw = 0
                     for result in yolo_results:
+                        if result.boxes is None:
+                            continue
+                        total_raw += len(result.boxes)
                         for box in result.boxes:
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
                             conf = float(box.conf[0])
-                            track_id = int(box.id[0]) if box.id is not None else -1
-                            
-                            # Conservar texto OCR del mismo track_id (prioridad), si no existe o -1, por distancia
+                            track_id = -1  # predict() no tiene IDs de track; se usa posición
+
+                            # Conservar texto OCR previo por proximidad de posición
                             prev_text = ""
-                            if track_id != -1 and cached_boxes:
-                                prev_text = next((b[4] for b in cached_boxes if len(b) > 6 and b[6] == track_id), "")
-                            if not prev_text and cached_boxes:
+                            if cached_boxes:
                                 prev_text = next(
                                     (b[4] for b in cached_boxes
-                                     if abs(b[0] - x1) < 60 and abs(b[1] - y1) < 60),
+                                     if abs(b[0] - x1) < 80 and abs(b[1] - y1) < 80),
                                     ""
                                 )
                             new_boxes.append((x1, y1, x2, y2, prev_text, conf, track_id))
+
+                    # Log de diagnóstico — visible en consola para verificar que YOLO funciona
+                    if frame_count % (INFER_EVERY_N * 15) == 0:  # cada ~15 inferencias
+                        logger.info(
+                            f"[YOLO] frame={frame_count} | raw_boxes={total_raw} "
+                            f"| cached={len(new_boxes)} | conf_thresh={DETECTION_CONFIDENCE}"
+                        )
+
                     cached_boxes = new_boxes
 
                     infer_frames += 1
@@ -408,10 +531,25 @@ class ALPRDetector:
                             and (now - last_ocr_time) >= OCR_INTERVAL_SEC
                             and (self._ocr_future is None
                                  or self._ocr_future.done())):
-                        last_ocr_time  = now
+                        last_ocr_time = now
+                        # Extraer solo los ROI crops (no copiar el frame completo)
+                        # Esto reduce el uso de memoria: solo las regiones de placa pasan al executor
+                        fh, fw = frame.shape[:2]
+                        roi_crops = []
+                        for b in cached_boxes:
+                            bx1, by1, bx2, by2 = b[0], b[1], b[2], b[3]
+                            bw  = max(1, bx2 - bx1)
+                            bh  = max(1, by2 - by1)
+                            pad_x = int(bw * 0.15)
+                            pad_y = int(bh * 0.25)
+                            crop = frame[
+                                max(0, by1 - pad_y): min(fh, by2 + pad_y),
+                                max(0, bx1 - pad_x): min(fw, bx2 + pad_x)
+                            ].copy()
+                            roi_crops.append(crop)
                         self._ocr_future = self._ocr_executor.submit(
                             self._run_ocr_job,
-                            frame.copy(),
+                            roi_crops,
                             list(cached_boxes),
                         )
 
@@ -457,10 +595,10 @@ class ALPRDetector:
 
     def _render_thread(self):
         """
-        Toma (frame, boxes) del det_queue, dibuja overlays, codifica JPEG.
-        Nunca toca el modelo ni el OCR → siempre rápido.
+        Codifica a JPEG crudo sin dibujar NADA encima.
+        Actualiza latest_boxes para que el cliente (Frontend) dibuje los rectángulos.
         """
-        logger.info("Hilo de render iniciado.")
+        logger.info("Hilo de render iniciado (Modo Zero-Cost CLI/Frontend).")
         try:
             while self._running:
                 try:
@@ -468,62 +606,20 @@ class ALPRDetector:
                 except queue.Empty:
                     continue
 
-                for box in boxes:
-                    x1, y1, x2, y2, text, conf = box[:6]
-                    # Color dinámico según confianza
-                    green = int(220 * conf)
-                    red   = int(220 * (1 - conf))
-                    color = (0, green, red)
-
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-                    # Badge de confianza
-                    conf_label = f"{conf:.0%}"
-                    (lw, lh), _ = cv2.getTextSize(
-                        conf_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
-                    )
-                    cv2.rectangle(
-                        frame, (x1, y1 - lh - 10), (x1 + lw + 8, y1), color, -1
-                    )
-                    cv2.putText(
-                        frame, conf_label, (x1 + 4, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2
-                    )
-
-                    if text:
-                        (tw, th), _ = cv2.getTextSize(
-                            text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2
-                        )
-                        overlay = frame.copy()
-                        cv2.rectangle(
-                            overlay,
-                            (x1, y2 + 2), (x1 + tw + 8, y2 + th + 12),
-                            (0, 0, 0), -1
-                        )
-                        cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-                        cv2.putText(
-                            frame, text, (x1 + 4, y2 + th + 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2
-                        )
-
-                # FPS overlay
-                with self._lock:
-                    fps_val   = self._stream_fps
-                    infer_val = self._infer_fps
-
-                cv2.putText(
-                    frame,
-                    f"CAM {fps_val:.0f} | INF {infer_val:.0f} FPS",
-                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 100), 2
-                )
-
+                # Cero operaciones de dibujo (cv2.rectangle, cv2.putText).
+                # Solo codificamos a JPG para mandar por red lo más rápido posible.
                 ret, buffer = cv2.imencode(
                     '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75]
                 )
                 if ret:
                     with self._lock:
                         self._latest_frame = buffer.tobytes()
-
+                        # Extraer info para el frontend (JSON serializable)
+                        self._latest_boxes = [
+                            {"x1": b[0], "y1": b[1], "x2": b[2], "y2": b[3], 
+                             "text": b[4], "conf": b[5], "track_id": b[6] if len(b) > 6 else -1}
+                            for b in boxes
+                        ]
         finally:
             logger.info("Hilo de render terminado.")
 
