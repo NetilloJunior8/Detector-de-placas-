@@ -45,20 +45,14 @@ from plate_logger import PlateLogger
 
 logger = setup_logger(__name__)
 
-# Regex universal para placas: permite combinaciones alfanuméricas de 5 a 8 caracteres
-_PLATE_RE = re.compile(r'^[A-Z0-9]{5,8}$')
+# Regex universal para placas: permite combinaciones alfanuméricas de 4 a 9 caracteres
+_PLATE_RE = re.compile(r'^[A-Z0-9]{4,9}$')
 
 
 def _is_valid_plate(text: str) -> bool:
     # Normalizar: quitar espacios y guiones antes de validar
     clean = text.strip().upper().replace(" ", "").replace("-", "")
     if len(clean) < PLATE_MIN_LEN:
-        return False
-        
-    # Validación extra: una placa real debe tener al menos un número y una letra
-    has_letters = any(c.isalpha() for c in clean)
-    has_numbers = any(c.isdigit() for c in clean)
-    if not (has_letters and has_numbers):
         return False
         
     # Aplicar el regex sobre el texto LIMPIO
@@ -272,8 +266,7 @@ class ALPRDetector:
 
     def _ocr_box(self, roi_crop: np.ndarray) -> str:
         """
-        Recibe el ROI ya recortado. Intenta OCR sobre la imagen preprocesada.
-        Si no obtiene resultado válido, reintenta con la imagen binarizada.
+        Recibe el ROI ya recortado. Intenta OCR sobre la imagen preprocesada con EasyOCR.
         """
         if roi_crop is None or roi_crop.size == 0:
             return ""
@@ -287,10 +280,10 @@ class ALPRDetector:
             heights = [max(pt[1] for pt in r[0]) - min(pt[1] for pt in r[0]) for r in valid]
             max_h = max(heights)
             texts = [r[1].upper().strip() for r, h in zip(valid, heights) if h >= max_h * 0.55]
-            return "".join(texts).strip()
+            # Limpiar texto (solo alfanumérico) para evitar guiones de tornillos
+            clean_texts = ["".join(c for c in t if c.isalnum()) for t in texts]
+            return "".join(clean_texts).strip()
 
-        # Intento 1: Imagen realzada (escala de grises con CLAHE). 
-        # EasyOCR funciona MUCHÍSIMO mejor con gradientes naturales que con imágenes binarizadas.
         best_text = ""
         try:
             results = self.reader.readtext(enhanced, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
@@ -298,13 +291,11 @@ class ALPRDetector:
         except Exception as e:
             logger.debug(f"OCR intento 1 falló: {e}")
 
-        # Intento 2 (fallback): Imagen binarizada (por si la placa está muy sucia o con sombras extremas)
+        # Intento 2 (fallback): Imagen binarizada
         if not best_text:
             try:
                 results2 = self.reader.readtext(binary, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
                 best_text = _process_results(results2, max(0.15, OCR_MIN_CONFIDENCE - 0.15))
-                if best_text:
-                    logger.debug(f"OCR fallback exitoso: '{best_text}'")
             except Exception as e:
                 logger.debug(f"OCR intento 2 falló: {e}")
 
@@ -540,13 +531,23 @@ class ALPRDetector:
                             bx1, by1, bx2, by2 = b[0], b[1], b[2], b[3]
                             bw  = max(1, bx2 - bx1)
                             bh  = max(1, by2 - by1)
-                            pad_x = int(bw * 0.15)
-                            pad_y = int(bh * 0.25)
-                            crop = frame[
-                                max(0, by1 - pad_y): min(fh, by2 + pad_y),
-                                max(0, bx1 - pad_x): min(fw, bx2 + pad_x)
-                            ].copy()
-                            roi_crops.append(crop)
+                            # Añadimos un padding pequeño (+5%)
+                            # Esto da margen a las letras para que PaddleOCR las reconozca,
+                            # sin ser excesivo como antes (+25%) que metía los marcos.
+                            pad_x = int(bw * 0.05)
+                            pad_y = int(bh * 0.05)
+                            
+                            # Asegurarnos de que el recorte no se voltee o sea inválido
+                            start_y = max(0, by1 - pad_y)
+                            end_y = min(fh, by2 + pad_y)
+                            start_x = max(0, bx1 - pad_x)
+                            end_x = min(fw, bx2 + pad_x)
+                            
+                            if end_y > start_y and end_x > start_x:
+                                crop = frame[start_y:end_y, start_x:end_x].copy()
+                                roi_crops.append(crop)
+                            else:
+                                roi_crops.append(frame[max(0, by1):min(fh, by2), max(0, bx1):min(fw, bx2)].copy())
                         self._ocr_future = self._ocr_executor.submit(
                             self._run_ocr_job,
                             roi_crops,
