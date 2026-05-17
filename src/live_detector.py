@@ -145,8 +145,10 @@ class ALPRDetector:
         self.model = YOLO(model_to_load, task='detect')
 
         # ── PaddleOCR ────────────────────────────────────────────────────────────
+        import logging
+        logging.getLogger("ppocr").setLevel(logging.ERROR)
         logger.info(f"Cargando PaddleOCR (GPU: {OCR_USE_GPU})")
-        self.reader = PaddleOCR(use_angle_cls=False, lang='en', use_gpu=OCR_USE_GPU, show_log=False)
+        self.reader = PaddleOCR(lang='en', use_gpu=OCR_USE_GPU)
 
         # ── CLAHE para pre-procesamiento OCR ─────────────────────────────────
         self._clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
@@ -295,7 +297,7 @@ class ALPRDetector:
 
         best_text = ""
         try:
-            results = self.reader.ocr(enhanced, cls=False)
+            results = self.reader.ocr(enhanced)
             best_text = _process_results(results, OCR_MIN_CONFIDENCE)
         except Exception as e:
             logger.debug(f"OCR intento 1 falló: {e}")
@@ -303,7 +305,7 @@ class ALPRDetector:
         # Intento 2 (fallback): Imagen binarizada
         if not best_text:
             try:
-                results2 = self.reader.ocr(binary, cls=False)
+                results2 = self.reader.ocr(binary)
                 best_text = _process_results(results2, max(0.15, OCR_MIN_CONFIDENCE - 0.15))
             except Exception as e:
                 logger.debug(f"OCR intento 2 falló: {e}")
