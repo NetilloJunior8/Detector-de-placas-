@@ -30,7 +30,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 import cv2
 import numpy as np
-import easyocr
+from paddleocr import PaddleOCR
 from ultralytics import YOLO
 
 from config.settings import (
@@ -144,9 +144,9 @@ class ALPRDetector:
         logger.info(f"Cargando modelo: {model_to_load}")
         self.model = YOLO(model_to_load, task='detect')
 
-        # ── EasyOCR ────────────────────────────────────────────────────────────
-        logger.info(f"Cargando EasyOCR (idiomas: {OCR_LANGUAGES}, GPU: {OCR_USE_GPU})")
-        self.reader = easyocr.Reader(OCR_LANGUAGES, gpu=OCR_USE_GPU)
+        # ── PaddleOCR ────────────────────────────────────────────────────────────
+        logger.info(f"Cargando PaddleOCR (GPU: {OCR_USE_GPU})")
+        self.reader = PaddleOCR(use_angle_cls=False, lang='en', use_gpu=OCR_USE_GPU, show_log=False)
 
         # ── CLAHE para pre-procesamiento OCR ─────────────────────────────────
         self._clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
@@ -266,7 +266,7 @@ class ALPRDetector:
 
     def _ocr_box(self, roi_crop: np.ndarray) -> str:
         """
-        Recibe el ROI ya recortado. Intenta OCR sobre la imagen preprocesada con EasyOCR.
+        Recibe el ROI ya recortado. Intenta OCR sobre la imagen preprocesada con PaddleOCR.
         """
         if roi_crop is None or roi_crop.size == 0:
             return ""
@@ -274,7 +274,16 @@ class ALPRDetector:
         enhanced, binary = self._preprocess_roi(roi_crop)
 
         def _process_results(results_list, min_conf):
-            valid = [r for r in results_list if r[2] >= min_conf]
+            if not results_list or not results_list[0]:
+                return ""
+            
+            formatted_results = []
+            for line in results_list[0]:
+                if line:
+                    box, (text, conf) = line
+                    formatted_results.append((box, text, conf))
+                    
+            valid = [r for r in formatted_results if r[2] >= min_conf]
             if not valid:
                 return ""
             heights = [max(pt[1] for pt in r[0]) - min(pt[1] for pt in r[0]) for r in valid]
@@ -286,7 +295,7 @@ class ALPRDetector:
 
         best_text = ""
         try:
-            results = self.reader.readtext(enhanced, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
+            results = self.reader.ocr(enhanced, cls=False)
             best_text = _process_results(results, OCR_MIN_CONFIDENCE)
         except Exception as e:
             logger.debug(f"OCR intento 1 falló: {e}")
@@ -294,7 +303,7 @@ class ALPRDetector:
         # Intento 2 (fallback): Imagen binarizada
         if not best_text:
             try:
-                results2 = self.reader.readtext(binary, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
+                results2 = self.reader.ocr(binary, cls=False)
                 best_text = _process_results(results2, max(0.15, OCR_MIN_CONFIDENCE - 0.15))
             except Exception as e:
                 logger.debug(f"OCR intento 2 falló: {e}")

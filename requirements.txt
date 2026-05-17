@@ -1,6 +1,8 @@
 ultralytics>=8.3.0              # YOLO11 (using ultralytics package)
 # OCR Engine: EasyOCR (Fallback stable)
-easyocr>=1.7.2
+# easyocr>=1.7.2
+paddlepaddle
+paddleocr
 opencv-contrib-python>=4.10.0.84  # OpenCV completo — incluye CLAHE y módulos extra
 onnxruntime-directml            # Aceleración por hardware dedicada para Windows (AMD/Intel GPU)
 Pillow>=10.4.0                  # Manipulación de imágenes
